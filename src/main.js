@@ -13,7 +13,7 @@ const BrowserWindow = electron.BrowserWindow;
 const Notification = electron.Notification;
 const Menu = electron.Menu;
 
-const rightClickContextMenu = require('electron-context-menu');
+const rightClickContextMenu = require('electron-context-menu').default;
 
 rightClickContextMenu({
     showInspectElement: false,
@@ -41,11 +41,15 @@ app.on('browser-window-blur', function () {
 app.on('browser-window-focus', function () {
     onFocus = true;
 })
-app.allowRendererProcessReuse = true
 
 let newAppTray = null;
-const dock32Icon = electron.nativeImage.createFromPath(appConf.dock32)
-const dock32EmptyIcon = electron.nativeImage.createFromPath(appConf.dock32Empty)
+const isMac = process.platform === 'darwin';
+const dock32Icon = electron.nativeImage.createFromPath(isMac ? appConf.macTray : appConf.dock32)
+const dock32EmptyIcon = electron.nativeImage.createFromPath(isMac ? appConf.macTrayEmpty : appConf.dock32Empty)
+if (isMac) {
+    dock32Icon.setTemplateImage(true);
+    dock32EmptyIcon.setTemplateImage(true);
+}
 
 // // 菜单 Template 
 // const appMenu = require("./windows/app_menu")
@@ -53,6 +57,11 @@ const dock32EmptyIcon = electron.nativeImage.createFromPath(appConf.dock32Empty)
 const globalShortcut = electron.globalShortcut;
 
 let mainWindow
+let isQuitting = false;
+
+app.on('before-quit', () => {
+    isQuitting = true;
+});
 let webContents
 
 function createWindow(configJson) {
@@ -61,7 +70,8 @@ function createWindow(configJson) {
         height: 770,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false
+            contextIsolation: false,
+            preload: require('path').join(__dirname, 'chat-shortcuts.js')
         },
         icon: appConf.icon128
     })
@@ -75,16 +85,14 @@ function createWindow(configJson) {
         loadUrl = configJson.startPageLink
     }
     console.log("load main page: " + loadUrl)
-    mainWindow.loadURL(loadUrl, {
-        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36'
-        // userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.158 Electron/8.2.0 Safari/537.36"
-    })
+    mainWindow.loadURL(loadUrl, { userAgent: app.userAgentFallback })
     webContents = mainWindow.webContents
     mainWindow.on('closed', function () {
         mainWindow = null
     })
 
     mainWindow.on('close', (event) => {
+        if (isQuitting) return;
         mainWindow.hide();
         mainWindow.setSkipTaskbar(true);
         event.preventDefault();
@@ -146,7 +154,8 @@ function createWindow(configJson) {
                     return oldNotification.permission;
                 }
             });
-            window.Notification = newNotification;`);
+            window.Notification = newNotification;
+            void 0;`);
 
             // 在页面加载完成之后，检查新版本信息
             updateChecker.checkInAppStart();
@@ -159,42 +168,24 @@ function createWindow(configJson) {
         electronUrl = ("" + configJson.larkOpenLink).split("\n")
     }
 
-    // 设置新窗口的 user agent
-    webContents.on("new-window", function(event, url, frameName, disposition, options, features, referer){
-        // feishu.cn/calendar/ 日历
-        // feishu.cn/space/home/ 文档
-        console.log("open url " + url)
-        event.preventDefault()
-        
-        let openInElectron = false
-        for(let i=0;i<electronUrl.length; i++){
-            if(electronUrl[i].trim() != "" && url.indexOf(electronUrl[i]) >= 0) {
-                openInElectron = true;
-                console.log("open url electron")
-                break;
-            }
+    webContents.setWindowOpenHandler(({ url }) => {
+        const openInElectron = electronUrl.some(link => link.trim() !== "" && url.includes(link));
+        if (openInElectron) {
+            return {
+                action: 'allow',
+                overrideBrowserWindowOptions: {
+                    width: 1200,
+                    height: 600,
+                    webPreferences: {
+                        nodeIntegration: false,
+                        contextIsolation: true
+                    }
+                }
+            };
         }
-
-        if(openInElectron) {
-            // 将所有打开的新页面的 user agent 也重新设置，避免提示浏览器错误
-            const win = new BrowserWindow({
-                width: 1200,
-                height: 600,
-              webContents: options.webContents,
-              show: false
-            })
-            win.once('ready-to-show', () => win.show())
-            if (!options.webContents) {
-              win.loadURL(url,{
-                userAgent : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.116 Safari/537.36"
-              })
-            }
-            event.newGuest = win;
-        } else {
-            shell.openExternal(url)
-            return;
-        }
-    })
+        shell.openExternal(url);
+        return { action: 'deny' };
+    });
 
     // 打开开发者模式
     // mainWindow.toggleDevTools()
@@ -262,7 +253,6 @@ const trayMenuTemplate = [
         click: function(){
             console.log("从 tray 退出")
             app.quit();
-            mainWindow.destroy()
         }
     }
 ];
@@ -285,7 +275,7 @@ function appTrayInit(){
 }
 
 function getConfigJson(callback){
-    fs.readFile('config.json','utf-8',function(err,data){
+    fs.readFile(appConf.configFile,'utf-8',function(err,data){
         if(err){
             console.error("load config error, may be have no config file~");
             callback({})
@@ -327,7 +317,6 @@ let menuTemplate = [
                 label: '退出程序',
                 click: function (item, focusedWindow) {
                     app.quit();
-                    mainWindow.destroy()
                     // openSettingsWindows();
                 }
             }, 
@@ -409,8 +398,20 @@ function openSettingsWindows(){
     }
 }
 
+if (process.platform === 'darwin') {
+    menuTemplate.unshift({ role: 'appMenu' });
+    menuTemplate.splice(2, 0, { role: 'editMenu' });
+}
+
+ipcMain.on('get-config-path', (event) => {
+    event.returnValue = appConf.configFile;
+});
+
 // ------------------------ App ------------------------------------
 app.on('ready', function () {
+    app.userAgentFallback = app.userAgentFallback
+        .replace(` ${app.getName()}/${app.getVersion()}`, '')
+        .replace(/ Electron\/\S+/g, '');
     
     // 系统菜单
     const menu = Menu.buildFromTemplate(menuTemplate)
@@ -443,8 +444,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-    if (win == null) {
-        createWindow();
+    if (mainWindow == null) {
+        getConfigJson(createWindow);
+    } else {
+        mainWindow.show();
+        mainWindow.setSkipTaskbar(false);
     }
 })
 

@@ -18,12 +18,13 @@
   "bugs": "https://github.com/Ericwyn/electron-lark/issues",
   "homepage": "https://github.com/Ericwyn/electron-lark",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "pack:mac": "install-electron && electron-builder --mac --arm64 --dir && codesign --force --deep --sign - 'dist/mac-arm64/Electron Lark.app'",
+    "test": "electron test/upgrade.cjs"
   },
   "devDependencies": {
-    "electron": "^15.2.0",
-    "electron-builder": "^22.13.1",
-    "electron-package": "^0.1.0"
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3"
   },
   "linux": {
     "category": "Office",
@@ -43,6 +44,33 @@
     }
   },
   "dependencies": {
-    "electron-context-menu": "^3.1.1"
+    "electron-context-menu": "5.0.0"
+  },
+  "build": {
+    "appId": "io.github.ericwyn.electron-lark",
+    "productName": "Electron Lark",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "icon/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "icon/macos.icns",
+      "identity": null,
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "electronDist": "node_modules/electron/dist"
   }
 }

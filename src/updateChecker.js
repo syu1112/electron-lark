@@ -13,7 +13,7 @@ let updateCheckJson;
 
 function getConfigJson(callback){
     if(appStoreFs == null) return
-    appStoreFs.readFile('updateCheck.json','utf-8',function(err,data){
+    appStoreFs.readFile(appConf.updateCheckFile,'utf-8',function(err,data){
         if(err){
             console.log(err)
             console.log("读取json配置文件失败")
@@ -34,7 +34,7 @@ function saveConfig(){
         console.log("fs 载入失败")
         return;
     }
-    appStoreFs.writeFile("updateCheck.json",JSON.stringify(updateCheckJson, null, "  "),function (err) {
+    appStoreFs.writeFile(appConf.updateCheckFile,JSON.stringify(updateCheckJson, null, "  "),function (err) {
         if(err){
             console.log(err);
         }else{

@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>Electron Lark test</title>
+<div class="lark__editor--simple lark__editor--chat">
+  <div id="editor" class="zone-container" contenteditable="true"></div>
+</div>
+<div id="other" contenteditable="true">Other field</div>
+<script>
+const editor = document.querySelector('#editor');
+let sent = [], newlines = 0, otherEnterShift;
+function resetChat() {
+  sent = []; newlines = 0; otherEnterShift = undefined;
+  editor.innerText = 'draft'; editor.focus();
+  const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false);
+  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+}
+function chatResult() { return {sent, newlines, text: editor.innerText, active: document.activeElement.id}; }
+// Model the web editor contract: Enter sends, Shift+Enter uses its newline handler.
+editor.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+  if (event.shiftKey) {
+    event.preventDefault(); document.execCommand('insertLineBreak'); newlines++;
+  } else if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault(); sent.push(editor.innerText); editor.innerText = '';
+  }
+});
+document.querySelector('#other').addEventListener('keydown', event => {
+  if (event.key === 'Enter') otherEnterShift = event.shiftKey;
+});
+</script>

@@ -206,6 +206,7 @@
 <script>
 
     let appStoreFs = require("fs");
+    const configFile = require('electron').ipcRenderer.sendSync('get-config-path');
 
     console.log("载入 electron-store 成功")
     console.log(appStoreFs)
@@ -249,7 +250,7 @@
 
     function getConfigJson(){
         if(appStoreFs == null) return
-        appStoreFs.readFile('config.json','utf-8',function(err,data){
+        appStoreFs.readFile(configFile,'utf-8',function(err,data){
             if(err){
                 console.log(err)
                 console.log("读取json配置文件失败")
@@ -274,7 +275,7 @@
             larkOpenLink: pageData.larkOpenLink,
             showWarterMark: pageData.showWarterMark,
         }
-        appStoreFs.writeFile("config.json",JSON.stringify(configJson, null, "  "),function (err) {
+        appStoreFs.writeFile(configFile,JSON.stringify(configJson, null, "  "),function (err) {
             if(err){
                 console.log(err);
             }else{
