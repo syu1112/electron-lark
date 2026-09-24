@@ -1,6 +1,6 @@
 'use strict';
 
-if (process.platform === 'darwin') {
+if (window.larkDesktop?.platform === 'darwin') {
     let composing = false;
     window.addEventListener('compositionstart', () => { composing = true; }, true);
     window.addEventListener('compositionend', () => { composing = false; }, true);

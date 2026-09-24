@@ -103,10 +103,37 @@
                     <li class="mdui-list-item mdui-ripple" onclick="showPage('version-info')">
                         <div class="mdui-list-item-content drawer-item">版本信息</div>
                     </li>
+                    <li class="mdui-list-item mdui-ripple" onclick="showPage('jev-set')">
+                        <div class="mdui-list-item-content drawer-item">Jev 助手</div>
+                    </li>
                 </ul>
             </div>
         </div>
         <div class="container" style="padding-left: 180px">
+            <div v-if="pageShow==='jev-set'">
+                <div class="set-title-panel"><p>Jev 助手</p></div>
+                <p>在消息浮窗点击「Jev 分析」后才运行。候选回复点击后追加到输入框，由你确认发送。</p>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">前序已加载消息条数（0–50）</label><input aria-label="前序消息条数" type="number" min="0" max="50" step="1" class="mdui-textfield-input" v-model.number="assistant.contextLimit"></div>
+                <p>所选消息另计；先从前序范围中剔除无关消息，不向前补数。</p>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">Jev Decisions 完整 HTTPS 地址</label><input class="mdui-textfield-input" v-model="assistant.jevEndpoint"></div>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">Jev 模型</label><input class="mdui-textfield-input" v-model="assistant.jevModel"></div>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">OpenRouter API Key（{{assistant.hasJevKey ? '已保存，留空保留' : '未配置'}}）</label><input type="password" autocomplete="off" class="mdui-textfield-input" v-model="jevApiKey"></div>
+                <label class="mdui-checkbox"><input type="checkbox" v-model="clearJevKey"><i class="mdui-checkbox-icon"></i>清除已保存的 Key</label>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">本地 Codex CLI 路径（留空自动查找）</label><input class="mdui-textfield-input" v-model="assistant.codexPath"></div>
+                <div class="mdui-textfield"><label class="mdui-textfield-label">Codex 模型（可选）</label><input class="mdui-textfield-input" v-model="assistant.codexModel"></div>
+                <div class="mdui-textfield"><label class="mdui-textfield-label" for="reply-mode">默认回复模式</label><select id="reply-mode" aria-label="默认回复模式" class="mdui-select" v-model="assistant.defaultReplyMode"><option value="professional">专业</option><option value="friendly">友善</option><option value="concise">简短</option><option value="firm">坚定</option><option value="pushback">怼人</option><option value="sarcastic">阴阳怪气</option><option value="humorous">幽默</option></select></div>
+                <div class="mdui-textfield"><label class="mdui-textfield-label" for="codex-effort">Codex 思考强度</label><select id="codex-effort" aria-label="Codex 思考强度" class="mdui-select" v-model="assistant.codexReasoningEffort"><option value="">跟随模型默认</option><option value="none">无（none）</option><option value="minimal">最低（minimal）</option><option value="low">低（low）</option><option value="medium">中（medium）</option><option value="high">高（high）</option><option value="xhigh">更高（xhigh）</option><option value="max">最大（max）</option><option value="ultra">Ultra（ultra）</option></select></div>
+                <p>可用强度取决于所选模型和本机 CLI；不支持的组合会显示错误，不会静默替换。</p>
+                <p class="doc-title">本地 Skill</p>
+                <div v-for="(skill,index) in assistant.skills" :key="skill.id" style="border-bottom:1px solid #ddd;padding-bottom:12px;margin-bottom:12px">
+                    <div class="mdui-textfield"><label class="mdui-textfield-label">显示名称</label><input class="mdui-textfield-input" v-model="skill.name" maxlength="100"></div>
+                    <div class="mdui-textfield"><label class="mdui-textfield-label">SKILL.md 完整路径</label><input class="mdui-textfield-input" v-model="skill.path"></div>
+                    <button type="button" class="mdui-btn" @click="assistant.skills.splice(index,1)">移除</button>
+                </div>
+                <button type="button" class="mdui-btn mdui-color-theme" @click="addSkill">添加本地 Skill</button>
+                <p>点击 Jev 分析时可选择一个 Skill。所选 Skill 通过本地 Codex 完整执行，复用 CLI 已配置的命令、工具和登录；需要授权或补充信息时在分析面板处理。回复仍由你确认发送。</p>
+                <p>使用本机 Codex 已有登录，无需另配 OpenAI API Key。候选上下文交给 Jev 筛选，筛后上下文交给 Codex 生成回复。</p>
+            </div>
             <div v-if="pageShow==='host-set'">
                 <div class="set-title-panel">
                     <p class="doc-title">服务器设置</p>
@@ -205,12 +232,6 @@
 <script src="mdui.min.js" type="text/javascript"></script>
 <script>
 
-    let appStoreFs = require("fs");
-    const configFile = require('electron').ipcRenderer.sendSync('get-config-path');
-
-    console.log("载入 electron-store 成功")
-    console.log(appStoreFs)
-
     const KEY_START_PAGE = "startPageLink"
     const KEY_LARK_OPEN_LINK = "larkOpenLink"
 
@@ -221,6 +242,9 @@
         larkOpenLink: null, // 需要在 electron 内打开的链接
         showWarterMark: false,
         packageVersion: "未知版本",
+        assistant: {},
+        jevApiKey: '',
+        clearJevKey: false,
     };
 
     getConfigJson();
@@ -229,16 +253,14 @@
         el: "#page",
         data: pageData,
         methods: {
-
+            async addSkill(){
+                try{const skill=await window.desktopSettings.pickSkill();if(skill){if(pageData.assistant.skills.some(item=>item.path===skill.path)){mdui.snackbar({message:'此 Skill 已添加'});return;}pageData.assistant.skills.push(skill);}}
+                catch(error){mdui.snackbar({message:error.message.replace(/^Error invoking remote method '[^']+': Error: /,'')});}
+            }
         }
     });
 
     // 读取版本信息
-    try{
-        const path = require('path')
-        let packageVersion = require(path.join(__dirname, './../../../package.json')).version
-        pageData.packageVersion = packageVersion;
-    }catch(e) {}
 
     function showPage(page){
         pageData.pageShow = page
@@ -248,44 +270,29 @@
        saveConfig()
     }
 
-    function getConfigJson(){
-        if(appStoreFs == null) return
-        appStoreFs.readFile(configFile,'utf-8',function(err,data){
-            if(err){
-                console.log(err)
-                console.log("读取json配置文件失败")
-            }
-            else{
-                console.log("read config json:" + data);
-                let configJson = JSON.parse(data);
-                pageData.startPageLink = configJson.startPageLink;
-                pageData.larkOpenLink = configJson.larkOpenLink;
-                pageData.showWarterMark = configJson.showWarterMark;
-            }
-        });
+    async function getConfigJson(){
+        try {
+            const config=await window.desktopSettings.read();
+            pageData.startPageLink=config.startPageLink;
+            pageData.larkOpenLink=config.larkOpenLink;
+            pageData.showWarterMark=config.showWarterMark;
+            pageData.assistant=config.assistant;
+            pageData.packageVersion=config.version;
+        } catch {mdui.snackbar({message:'设置读取失败，请检查配置文件'});}
     }
 
-    function saveConfig(){
-        if (appStoreFs == null) {
-            console.log("fs 载入失败")
-            return;
-        }
+    async function saveConfig(){
         let configJson = {
             startPageLink: pageData.startPageLink,
             larkOpenLink: pageData.larkOpenLink,
             showWarterMark: pageData.showWarterMark,
         }
-        appStoreFs.writeFile(configFile,JSON.stringify(configJson, null, "  "),function (err) {
-            if(err){
-                console.log(err);
-            }else{
-                console.log("配置保存成功")
-                mdui.snackbar({
-                    message: '配置保存成功'
-                });
-
-            }
-        })
+        if(pageData.pageShow==='jev-set')configJson.assistant={...pageData.assistant,jevApiKey:pageData.jevApiKey,clearJevKey:pageData.clearJevKey};
+        try {
+            const result=await window.desktopSettings.save(configJson);
+            pageData.assistant=result.assistant;pageData.jevApiKey='';pageData.clearJevKey=false;
+            mdui.snackbar({message:'配置保存成功'});
+        }catch(error){mdui.snackbar({message:error.message.replace(/^Error invoking remote method '[^']+': Error: /,'')});}
     }
 
     function exitSetting(){
@@ -293,11 +300,11 @@
     }
 
     function gotoGitub(){
-        require('electron').shell.openExternal('https://github.com/Ericwyn/electron-lark')
+        window.desktopSettings.openProject(false)
     }
 
     function gotoRelease(){
-        require('electron').shell.openExternal('https://github.com/Ericwyn/electron-lark/releases')
+        window.desktopSettings.openProject(true)
     }
 
 </script>

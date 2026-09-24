@@ -114,9 +114,10 @@ server.listen(0, '127.0.0.1', async () => {
     }
     await check('plain Enter inserts a newline instead of sending', async () => {
         win.show(); win.focus();
-        await waitFor(() => win.webContents.executeJavaScript('document.hasFocus()'));
+        app.focus({steal:true});
         await win.webContents.executeJavaScript('resetChat()');
         await enter();
+        await waitFor(()=>win.webContents.executeJavaScript('chatResult().newlines > 0 || chatResult().sent.length > 0'));
         const result = await win.webContents.executeJavaScript('chatResult()');
         assert.equal(result.sent.length, 0);
         assert.equal(result.newlines, 1, JSON.stringify(result));
@@ -158,18 +159,37 @@ server.listen(0, '127.0.0.1', async () => {
         let settings = await waitFor(() => BrowserWindow.getAllWindows().find(w => w !== win));
         await waitFor(() => !settings.webContents.isLoading());
         await waitFor(() => settings.webContents.executeJavaScript(`pageData.startPageLink === '${base}'`));
+        assert.equal(await settings.webContents.executeJavaScript('typeof require'),'undefined');
         await settings.webContents.executeJavaScript('pageData.showWarterMark = false; saveConfig();');
         await waitFor(() => {
             try { return JSON.parse(fs.readFileSync(path.join(profile, 'config.json'))).showWarterMark === false; }
             catch { return false; }
         });
-        settings.close();
+        await new Promise(resolve=>{settings.once('closed',resolve);settings.close();});
         item.click();
         settings = await waitFor(() => BrowserWindow.getAllWindows().find(w => w !== win));
         await waitFor(() => !settings.webContents.isLoading());
         await waitFor(() => settings.webContents.executeJavaScript(`pageData.startPageLink === '${base}'`));
         assert.equal(await settings.webContents.executeJavaScript('pageData.showWarterMark'), false);
+        await settings.webContents.executeJavaScript(`showPage('jev-set');pageData.assistant.skills=[{id:'synthetic',name:'合成技能',path:${JSON.stringify(path.resolve(__dirname,'fixtures/synthetic-skill/SKILL.md'))}}]`);
+        await waitFor(()=>settings.webContents.executeJavaScript('!!document.querySelector("#codex-effort")'));
+        await settings.webContents.executeJavaScript('document.querySelector("#codex-effort").value="high";document.querySelector("#codex-effort").dispatchEvent(new Event("change"));document.querySelector("#reply-mode").value="firm";document.querySelector("#reply-mode").dispatchEvent(new Event("change"));saveConfig();');
+        await waitFor(()=>JSON.parse(fs.readFileSync(path.join(profile,'config.json'))).assistant?.codexReasoningEffort==='high');
+        assert.equal(JSON.parse(fs.readFileSync(path.join(profile,'config.json'))).assistant.skills[0].id,'synthetic');
+        assert.equal(JSON.parse(fs.readFileSync(path.join(profile,'config.json'))).assistant.defaultReplyMode,'firm');
+        assert.equal(await settings.webContents.executeJavaScript('!!document.querySelector("#codex-effort option[value=none]")'),true);
         settings.close();
+    });
+    await check('another window cannot use the private settings IPC',async()=>{
+        const outsider=new BrowserWindow({show:false,webPreferences:{nodeIntegration:false,contextIsolation:true,preload:path.resolve(__dirname,'../src/windows/settings-preload.js')}});
+        await outsider.loadURL(base);
+        assert.equal(await outsider.webContents.executeJavaScript('desktopSettings.read().then(()=>false,()=>true)'),true);
+        assert.equal(await outsider.webContents.executeJavaScript('desktopSettings.save({showWarterMark:true}).then(()=>false,()=>true)'),true);
+        assert.equal(await outsider.webContents.executeJavaScript('desktopSettings.pickSkill().then(()=>false,()=>true)'),true);
+        assert.equal(JSON.parse(fs.readFileSync(path.join(profile,'config.json'))).showWarterMark,false);
+        outsider.destroy();
+        assert.equal(await win.webContents.executeJavaScript('typeof require'), 'undefined');
+        assert.equal(await win.webContents.executeJavaScript('typeof desktopSettings'), 'undefined');
     });
     await check('Dock activation restores the main window', async () => {
         win.hide(); app.emit('activate'); assert(win.isVisible());

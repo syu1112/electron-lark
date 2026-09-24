@@ -20,7 +20,7 @@
   "scripts": {
     "start": "electron .",
     "pack:mac": "install-electron && electron-builder --mac --arm64 --dir && codesign --force --deep --sign - 'dist/mac-arm64/Electron Lark.app'",
-    "test": "electron test/upgrade.cjs"
+    "test": "node --test test/assistant/*.test.cjs && electron test/assistant-ui.cjs && electron test/upgrade.cjs"
   },
   "devDependencies": {
     "electron": "44.4.3",

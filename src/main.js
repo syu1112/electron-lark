@@ -4,6 +4,16 @@ const appConf = require("./configuration")
 
 const electron = require('electron')
 const fs = require('fs')
+const path = require('path');
+const {pathToFileURL}=require('url');
+const {createSettingsStore}=require('./assistant/settings-store');
+const {createJevClient}=require('./assistant/jev-client');
+const {generateReplies}=require('./assistant/codex-replies');
+const {createAnalysisService}=require('./assistant/analysis-service');
+const {readSkill}=require('./assistant/skills');
+const {randomUUID}=require('node:crypto');
+const settingsStore=createSettingsStore({configFile:appConf.configFile,safeStorage:electron.safeStorage});
+const analysisService=createAnalysisService({settingsStore,jevClient:createJevClient(),generateReplies});
 const updateChecker = require('./updateChecker')
 
 const shell = electron.shell;
@@ -57,6 +67,9 @@ if (isMac) {
 const globalShortcut = electron.globalShortcut;
 
 let mainWindow
+let settingsWindow=null;
+let configuredOrigin='';
+const settingsURL=pathToFileURL(path.join(__dirname,'windows/views/settings.html')).href;
 let isQuitting = false;
 
 app.on('before-quit', () => {
@@ -69,9 +82,10 @@ function createWindow(configJson) {
         width: 1000,
         height: 770,
         webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false,
-            preload: require('path').join(__dirname, 'chat-shortcuts.js')
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: false,
+            preload: path.join(__dirname, 'chat-preload.js')
         },
         icon: appConf.icon128
     })
@@ -84,9 +98,12 @@ function createWindow(configJson) {
         && configJson.startPageLink.trim() != "") {
         loadUrl = configJson.startPageLink
     }
-    console.log("load main page: " + loadUrl)
+    configuredOrigin=new URL(loadUrl).origin;
     mainWindow.loadURL(loadUrl, { userAgent: app.userAgentFallback })
     webContents = mainWindow.webContents
+    const ownerId=webContents.id;
+    webContents.on('did-start-navigation',(_event,_url,_inPlace,isMainFrame)=>{if(isMainFrame)analysisService.cancelOwner(ownerId);});
+    webContents.on('destroyed',()=>analysisService.cancelOwner(ownerId));
     mainWindow.on('closed', function () {
         mainWindow = null
     })
@@ -107,9 +124,12 @@ function createWindow(configJson) {
     // 窗口加载完成后运行
     // 关于图标的闪烁，方法是每1.5s做一个轮询，查看是否有未读消息提醒，如果有的话就闪烁
     // 侧边栏 class 为 larkc-badge-count circle navbarMenu-badge larkc-badge-normal
+    let unreadTimer;
+    webContents.on('destroyed',()=>clearInterval(unreadTimer));
     webContents.on("did-finish-load", function() {
-        setInterval(() => {
-            if(mainWindow != null && !mainWindow.isVisible){
+        clearInterval(unreadTimer);
+        unreadTimer=setInterval(() => {
+            if(mainWindow == null || !mainWindow.isVisible()){
                 return
             }
             webContents.executeJavaScript(`document.getElementsByClassName('larkc-badge-count circle larkc-badge-normal').length`)
@@ -127,21 +147,12 @@ function createWindow(configJson) {
         
         // 注入 js，hack html5 的 Notification 接口，并将通知内容转发到 main.js 里
         webContents.executeJavaScript(`
-            let ipcRenderer = null;
-            try{ipcRenderer = require('electron').ipcRenderer} catch(e) {}
             let oldNotification = window.Notification;
             let newNotification = function(title, opt){
-                console.log("hack-title:" + title);
-                console.log("hack-opt:" + JSON.stringify(opt));
-                if(ipcRenderer != null) {
-                    let sendMsg = JSON.stringify({
-                        title: title,
-                        opt: opt
-                    })
+                if(window.larkDesktop) {
                     try {
-                        ipcRenderer.send("notification", sendMsg);
+                        window.larkDesktop.notify(title,opt);
                     } catch (e) {
-                        console.log("发送 ipc 消息报错", e);
                         return new oldNotification(title,opt);
                     }
                 } else {
@@ -156,6 +167,7 @@ function createWindow(configJson) {
             });
             window.Notification = newNotification;
             void 0;`);
+        webContents.executeJavaScript(fs.readFileSync(path.join(__dirname,'chat-shortcuts.js'),'utf8'));
 
             // 在页面加载完成之后，检查新版本信息
             updateChecker.checkInAppStart();
@@ -281,8 +293,7 @@ function getConfigJson(callback){
             callback({})
         }
         else{
-            console.log("read config json:" + data);
-            callback(JSON.parse(data))
+            try {callback(JSON.parse(data));} catch {callback({});}
         }
     });
 }
@@ -377,7 +388,6 @@ let menuTemplate = [
  * 打开设置窗口
  */
 function openSettingsWindows(){
-    let settingsWindow = null;
     if(settingsWindow == null) {
         settingsWindow = new BrowserWindow({
             width: 700,
@@ -386,16 +396,20 @@ function openSettingsWindows(){
             // height: 200,
             resizable: false,
             webPreferences: {
-                nodeIntegration: true,
-                contextIsolation: false
+                nodeIntegration: false,
+                contextIsolation: true,
+                preload:path.join(__dirname,'windows/settings-preload.js')
             },
         });
 
         // console.log(settingsWindow)
         // settingsWindow.loadUrl('file://' + __dirname + '/app/settings.html');
-        settingsWindow.loadURL('file://' +__dirname+ '/windows/views/settings.html');
+        settingsWindow.loadURL(settingsURL);
+        settingsWindow.on('closed',()=>{settingsWindow=null;});
+        settingsWindow.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+        settingsWindow.webContents.on('will-navigate',event=>event.preventDefault());
         // settingsWindow.toggleDevTools();
-    }
+    } else {settingsWindow.show();settingsWindow.focus();}
 }
 
 if (process.platform === 'darwin') {
@@ -403,9 +417,39 @@ if (process.platform === 'darwin') {
     menuTemplate.splice(2, 0, { role: 'editMenu' });
 }
 
-ipcMain.on('get-config-path', (event) => {
-    event.returnValue = appConf.configFile;
+function trustedChat(event) {
+    if(!mainWindow || event.sender!==mainWindow.webContents || event.senderFrame!==event.sender.mainFrame)return false;
+    try {return new URL(event.senderFrame.url).origin===configuredOrigin;}catch{return false;}
+}
+function trustedSettings(event) {return settingsWindow && event.sender===settingsWindow.webContents && event.senderFrame===event.sender.mainFrame && event.senderFrame.url===settingsURL;}
+ipcMain.handle('settings:read',async event=>{if(!trustedSettings(event))throw Error('访问被拒绝');return {...await settingsStore.readPublic(),version:app.getVersion()};});
+ipcMain.handle('settings:pick-skill',async event=>{
+    if(!trustedSettings(event))throw Error('访问被拒绝');
+    const selected=await electron.dialog.showOpenDialog(settingsWindow,{title:'选择本地 SKILL.md',properties:['openFile'],filters:[{name:'Skill Markdown',extensions:['md']}]});
+    if(selected.canceled)return null;
+    const skill=await readSkill({id:randomUUID(),path:selected.filePaths[0]});
+    return {id:skill.id,name:skill.name,path:skill.path};
 });
+ipcMain.handle('settings:save',async(event,input)=>{
+    if(!trustedSettings(event))throw Error('访问被拒绝');
+    const result=await settingsStore.save(input);
+    if(mainWindow){analysisService.cancelOwner(mainWindow.webContents.id);mainWindow.webContents.send('assistant:settings-changed');}
+    return result;
+});
+ipcMain.on('settings:open-project',(event,releases)=>{if(trustedSettings(event))shell.openExternal('https://github.com/Ericwyn/electron-lark'+(releases?'/releases':''));});
+ipcMain.handle('assistant:config',async event=>{if(!trustedChat(event))throw Error('访问被拒绝');const {assistant}=await settingsStore.readPublic();return {contextLimit:assistant.contextLimit,revision:assistant.revision,defaultReplyMode:assistant.defaultReplyMode,skills:assistant.skills.map(({id,name})=>({id,name}))};});
+function sendProgress(event,progress){if(trustedChat(event))event.sender.send('assistant:progress',progress);}
+ipcMain.on('assistant:start',(event,input)=>{if(trustedChat(event))analysisService.start(event.sender.id,input,progress=>sendProgress(event,progress));});
+ipcMain.on('assistant:cancel',(event,id)=>{if(trustedChat(event))analysisService.cancel(event.sender.id,id);});
+ipcMain.handle('assistant:copy',(event,input)=>{if(!trustedChat(event))throw Error('访问被拒绝');const text=analysisService.replyText(event.sender.id,input);if(text==null)return false;electron.clipboard.writeText(text);return true;});
+ipcMain.on('assistant:clear',event=>{if(trustedChat(event))analysisService.cancelOwner(event.sender.id);});
+ipcMain.on('assistant:respond',(event,input)=>{if(trustedChat(event))analysisService.respond(event.sender.id,input);});
+ipcMain.on('assistant:open-interaction-url',(event,input)=>{
+    if(!trustedChat(event))return;
+    const url=analysisService.interactionUrl(event.sender.id,input);
+    if(url && new URL(url).protocol==='https:')shell.openExternal(url);
+});
+ipcMain.on('assistant:retry-ranking',(event,id)=>{if(trustedChat(event))analysisService.retryRanking(event.sender.id,id,progress=>sendProgress(event,progress)).catch(()=>{});});
 
 // ------------------------ App ------------------------------------
 app.on('ready', function () {
@@ -433,7 +477,6 @@ app.on('ready', function () {
 
     // app on 了之后先进行 ajax 请求配置详情，成功之后再 createWindows
     getConfigJson(function (json){
-        console.log(json)
         createWindow(json);
     })
 
@@ -457,7 +500,10 @@ ipcMain.on("notification", (event, msg) => {
     // console.log("收到消息")
     // console.log(event)
     // console.log(msg)
-    let args = JSON.parse(msg)
+    if(!trustedChat(event))return;
+    let args;
+    try{args=JSON.parse(msg);}catch{return;}
+    if(typeof args?.title!=='string' || !args.opt || typeof args.opt.body!=='string')return;
     // let title = args.title;
     // let opt = args.opt;
     // console.log(args.title, args.opt);
@@ -482,7 +528,7 @@ function showLarkNotify(title, opt, channelId){
                 try{webContents.executeJavaScript(`
                     var doms = document.getElementsByTagName("div");
                     for(let i =0;i<doms.length;i++){
-                        if(doms[i].getAttribute("data-feed-id") == '${channelId}') {
+                        if(doms[i].getAttribute("data-feed-id") == ${JSON.stringify(String(channelId))}) {
                             doms[i].click();
                             break;
                         }

@@ -3,3 +3,8 @@ dist/
 .DS_Store
 config.json
 updateCheck.json
+/.idea/.gitignore
+/.idea/electron-lark.iml
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/vcs.xml
