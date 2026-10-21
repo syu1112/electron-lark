@@ -11,7 +11,10 @@ const {getMode}=require('./reply-modes');
 async function resolveCodexPath(configuredPath) {
     const choices = configuredPath ? [configuredPath] : [
         ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map(dir=>path.join(dir,process.platform === 'win32' ? 'codex.exe' : 'codex')),
-        '/Applications/ChatGPT.app/Contents/Resources/codex','/Applications/Codex.app/Contents/Resources/codex'
+        ...['ChatGPT','Codex'].flatMap(app=>[
+            `/Applications/${app}.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`,
+            `/Applications/${app}.app/Contents/Resources/codex`
+        ])
     ];
     for (const candidate of choices) {
         if (!path.isAbsolute(candidate) || /[\r\n\0]/.test(candidate)) continue;

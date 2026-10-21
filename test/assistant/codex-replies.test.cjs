@@ -42,6 +42,19 @@ test('cancelled generation waits for child exit and removes its directory',async
 test('nonexistent CLI path fails without shell execution',async()=>{
   await assert.rejects(resolveCodexPath('/definitely/missing/codex'),{code:'CLI_NOT_FOUND'});
 });
+test('automatic discovery finds the nested macOS CLI bundle without a shell PATH',async t=>{
+  const previousPath=process.env.PATH;
+  process.env.PATH='/usr/bin:/bin';
+  t.after(()=>{if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;});
+  let available;
+  t.mock.method(fs,'access',async candidate=>{if(candidate!==available)throw Object.assign(new Error('missing'),{code:'ENOENT'});});
+  t.mock.method(fs,'stat',async()=>({isFile:()=>true}));
+  for(const app of ['ChatGPT','Codex']) {
+    available=`/Applications/${app}.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`;
+    assert.equal(await resolveCodexPath(''),available);
+  }
+  await assert.rejects(resolveCodexPath('/explicit/missing/codex'),{code:'CLI_NOT_FOUND'});
+});
 test('generation returns sourced investigation evidence and keeps mode rewrites tool-free',async()=>{
   let evidence;
   const replies=await generateReplies(config,{...input('TEST_EVIDENCE'),modeId:'pushback',rewrite:true,evidence:[{fact:'已核实状态',source:'合成查询'}]},{spawnImpl:fakeSpawn,onEvidence:value=>evidence=value});
