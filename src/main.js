@@ -12,6 +12,7 @@ const {generateReplies}=require('./assistant/codex-replies');
 const {createAnalysisService}=require('./assistant/analysis-service');
 const {readSkill}=require('./assistant/skills');
 const {randomUUID}=require('node:crypto');
+const {createAppWindows}=require('./app-window');
 const settingsStore=createSettingsStore({configFile:appConf.configFile,safeStorage:electron.safeStorage});
 const analysisService=createAnalysisService({settingsStore,jevClient:createJevClient(),generateReplies});
 const updateChecker = require('./updateChecker')
@@ -78,17 +79,20 @@ app.on('before-quit', () => {
 let webContents
 
 function createWindow(configJson) {
+    const chatPreferences = {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: false,
+        preload: path.join(__dirname, 'chat-preload.js')
+    };
+    const chatView = new electron.WebContentsView({webPreferences: {...chatPreferences}});
     mainWindow = new BrowserWindow({
         width: 1000,
         height: 770,
-        webPreferences: {
-            nodeIntegration: false,
-            contextIsolation: true,
-            sandbox: false,
-            preload: path.join(__dirname, 'chat-preload.js')
-        },
+        webContents: chatView.webContents,
+        webPreferences: {...chatPreferences},
         icon: appConf.icon128
-    })
+    });
 
     // mainWindow.loadFile('index.html')
     // 改为使用loadURL加载飞书地址
@@ -101,8 +105,25 @@ function createWindow(configJson) {
     configuredOrigin=new URL(loadUrl).origin;
     mainWindow.loadURL(loadUrl, { userAgent: app.userAgentFallback })
     webContents = mainWindow.webContents
+    const appWindows = createAppWindows(mainWindow, chatView);
+    const openAppLink = (event, url) => {
+        if (appWindows.handleLink(url)) event.preventDefault();
+    };
+    webContents.on('will-navigate', openAppLink);
+    webContents.on('will-redirect', openAppLink);
     const ownerId=webContents.id;
-    webContents.on('did-start-navigation',(_event,_url,_inPlace,isMainFrame)=>{if(isMainFrame)analysisService.cancelOwner(ownerId);});
+    webContents.on('did-start-navigation',(_event,_url,inPlace,isMainFrame)=>{
+        if (!isMainFrame) return;
+        analysisService.cancelOwner(ownerId);
+        if (!inPlace) {
+            for (const [id, entry] of activeNotifications) {
+                if (entry.sender === webContents) {
+                    entry.notification.close();
+                    activeNotifications.delete(id);
+                }
+            }
+        }
+    });
     webContents.on('destroyed',()=>analysisService.cancelOwner(ownerId));
     mainWindow.on('closed', function () {
         mainWindow = null
@@ -145,28 +166,7 @@ function createWindow(configJson) {
             }
         }, 1500);
         
-        // 注入 js，hack html5 的 Notification 接口，并将通知内容转发到 main.js 里
-        webContents.executeJavaScript(`
-            let oldNotification = window.Notification;
-            let newNotification = function(title, opt){
-                if(window.larkDesktop) {
-                    try {
-                        window.larkDesktop.notify(title,opt);
-                    } catch (e) {
-                        return new oldNotification(title,opt);
-                    }
-                } else {
-                    return new oldNotification(title,opt);
-                }
-            }
-            newNotification.requestPermission = oldNotification.requestPermission.bind(oldNotification);
-            Object.defineProperty(newNotification, 'permission', {
-                get: () => {
-                    return oldNotification.permission;
-                }
-            });
-            window.Notification = newNotification;
-            void 0;`);
+        webContents.executeJavaScript(fs.readFileSync(path.join(__dirname,'notification-bridge.js'),'utf8'));
         webContents.executeJavaScript(fs.readFileSync(path.join(__dirname,'chat-shortcuts.js'),'utf8'));
 
             // 在页面加载完成之后，检查新版本信息
@@ -181,6 +181,7 @@ function createWindow(configJson) {
     }
 
     webContents.setWindowOpenHandler(({ url }) => {
+        if (appWindows.handleLink(url)) return {action: 'deny'};
         const openInElectron = electronUrl.some(link => link.trim() !== "" && url.includes(link));
         if (openInElectron) {
             return {
@@ -310,7 +311,6 @@ let menuTemplate = [
             {
                 label: '浏览器打开',
                 click: function (item, focusedWindow) {
-                    console.log("open in browser:" + focusedWindow.webContents.getURL());
                     require('electron').shell.openExternal(focusedWindow.webContents.getURL())
                 }
             },
@@ -508,36 +508,52 @@ ipcMain.on("notification", (event, msg) => {
     // let opt = args.opt;
     // console.log(args.title, args.opt);
     // title 是对话框名称，opt 是聊天的具体内容，想看格式的话可以去掉上面那行注释
-    showLarkNotify(args.title, args.opt, args.opt.channelId)
+    if(typeof args.id!=='string')return;
+    showLarkNotify(args.title, args.opt, event.sender, args.id)
     event.returnValue = 'pong'
 })
 
-function showLarkNotify(title, opt, channelId){
+const activeNotifications = new Map();
+ipcMain.on('notification:close', (event, id) => {
+    if (!trustedChat(event)) return;
+    const entry = activeNotifications.get(id);
+    if (!entry || entry.sender !== event.sender) return;
+    entry.notification.close();
+    activeNotifications.delete(id);
+});
+
+function showLarkNotify(title, opt, sender, id){
     if(Notification.isSupported()) {
-        let electronNotification = new Notification({
-            title: title,
-            subtitle : title,
-            body : opt.body,
+        const notification = new Notification({
+            title,
+            subtitle: title,
+            body: opt.body,
             icon: electron.nativeImage.createFromPath(appConf.dock32),
         });
-        electronNotification.addListener('click', function(){
-            if(mainWindow != null) mainWindow.show();
-            // 通过注入 js 打开具体的对话聊天框
-            // 参考 https://github.com/Ericwyn/electron-lark/commit/f8c4781fab5c6cd704aa2bba4be0d4d0cedcaab1#commitcomment-51571446
-            if(webContents != null) {
-                try{webContents.executeJavaScript(`
-                    var doms = document.getElementsByTagName("div");
-                    for(let i =0;i<doms.length;i++){
-                        if(doms[i].getAttribute("data-feed-id") == ${JSON.stringify(String(channelId))}) {
-                            doms[i].click();
-                            break;
-                        }
-                    }
-                `)}catch(e){
-                    console.log(e);
-                }
+        activeNotifications.set(id, {notification, sender});
+        const sendEvent = type => {
+            if (!sender.isDestroyed()) sender.send('notification:event', id, type);
+        };
+        notification.on('click', () => {
+            if (activeNotifications.get(id)?.notification !== notification) return;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                if (mainWindow.isMinimized()) mainWindow.restore();
+                mainWindow.show();
+                mainWindow.setSkipTaskbar(false);
+                mainWindow.focus();
             }
-        })
-        electronNotification.show();
+            if (!sender.isDestroyed()) sender.focus();
+            sendEvent('click');
+        });
+        notification.on('show', () => sendEvent('show'));
+        notification.on('close', () => {
+            sendEvent('close');
+            activeNotifications.delete(id);
+        });
+        notification.on('failed', () => {
+            sendEvent('error');
+            activeNotifications.delete(id);
+        });
+        notification.show();
     }
 }
